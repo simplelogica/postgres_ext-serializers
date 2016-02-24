@@ -1,18 +1,5 @@
 module PostgresExt::Serializers::ActiveModel
   module ArraySerializer
-    def self.prepended(base)
-      base.send :include, IncludeMethods
-    end
-
-    module IncludeMethods
-      def to_json(*)
-        if ActiveRecord::Relation === object
-          _postgres_serializable_array
-        else
-          super
-        end
-      end
-    end
 
     def initialize(*)
       super

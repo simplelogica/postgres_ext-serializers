@@ -6,7 +6,5 @@ module PostgresExt
   end
 end
 
-require 'postgres_ext/serializers/active_model'
 require 'active_model_serializers'
-
-ActiveModel::ArraySerializer.send :prepend, PostgresExt::Serializers::ActiveModel::ArraySerializer
+require 'postgres_ext/serializers/active_model'
