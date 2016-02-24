@@ -10,13 +10,14 @@ module PostgresExt::Serializers::ActiveModel
 
     private
 
-    def _postgres_serializable_array
-      _include_relation_in_root(object, serializer: @options[:each_serializer])
+    def _postgres_serializable_array association, options
+      _include_relation_in_root(association, options)
 
       jsons_select_manager = _results_table_arel
       jsons_select_manager.with @_ctes
 
-      object.klass.connection.select_value _visitor.accept(jsons_select_manager)
+      connection = association.serializer.object.klass.connection
+      connection.select_value jsons_select_manager.to_sql
     end
 
     def _include_relation_in_root(relation, *args)
@@ -24,22 +25,17 @@ module PostgresExt::Serializers::ActiveModel
       foreign_key_column = args[0]
       constraining_table = args[1]
 
-      relation_query = relation
+
+      _serializer = relation.serializer
+      relation_query = relation.serializer.object
       relation_query_arel = relation_query.arel_table
-      @_embedded << relation.table_name
+      @_embedded << relation_query.table_name
 
-      klass = ActiveRecord::Relation === relation ? relation.klass : relation
-      if local_options[:serializer].present?
-        serializer_class = local_options[:serializer]
-      else
-        serializer_class = _serializer_class(klass)
-      end
+      klass = ActiveRecord::Relation === relation_query ? relation_query.klass : relation_query
 
-      _serializer = serializer_class.new klass.new, options
+      serializer_class = relation.options[:serializer] || _serializer.class
 
-      attributes = serializer_class._attributes.select do |key, value|
-        _serializer.send("include_#{key}?")
-      end
+      attributes = serializer_class._attributes
 
       attributes.each do |name, key|
         if name.to_s == key.to_s
@@ -64,65 +60,64 @@ module PostgresExt::Serializers::ActiveModel
         end
       end
 
-      associations = serializer_class._associations.select do |key, value|
-        _serializer.send("include_#{key}?")
-      end
 
-      association_sql_tables = []
-      ids_table_name = nil
-      id_query = nil
-      unless associations.empty?
-        ids_table_name = "#{relation.table_name}_ids"
-        ids_table_arel =  Arel::Table.new ids_table_name
-        id_query = relation.dup.select(:id)
-        if foreign_key_column && constraining_table
-          if local_options[:belongs_to]
-            id_query.where!(relation_query_arel[:id].in(constraining_table.project(constraining_table[foreign_key_column])))
-          else
-            id_query.where!(relation_query_arel[foreign_key_column].in(constraining_table.project(constraining_table[:id])))
-          end
-        end
-      end
+      # associations = serializer_class._reflections
 
-      associations.each do |key, association_class|
-        association = association_class.new key, _serializer, options
+      # association_sql_tables = []
+      # ids_table_name = nil
+      # id_query = nil
+      # unless associations.empty?
+      #   ids_table_name = "#{relation.table_name}_ids"
+      #   ids_table_arel =  Arel::Table.new ids_table_name
+      #   id_query = relation.dup.select(:id)
+      #   if foreign_key_column && constraining_table
+      #     if local_options[:belongs_to]
+      #       id_query.where!(relation_query_arel[:id].in(constraining_table.project(constraining_table[foreign_key_column])))
+      #     else
+      #       id_query.where!(relation_query_arel[foreign_key_column].in(constraining_table.project(constraining_table[:id])))
+      #     end
+      #   end
+      # end
 
-        association_reflection = klass.reflect_on_association(key)
-        fkey = association_reflection.foreign_key
-        if association.embed_ids?
-          if association_reflection.macro == :has_many
-            unless @_ctes.find { |as| as.left == ids_table_name }
-              @_ctes << _postgres_cte_as(ids_table_name, "(#{id_query.to_sql})")
-            end
-            association_sql_tables << _process_has_many_relation(key, association_reflection, relation_query, ids_table_arel)
-          elsif klass.column_names.include?(fkey) && !attributes.include?(fkey.to_sym)
-            relation_query = relation_query.select(relation_query_arel[fkey])
-          end
-        end
-      end
+      # associations.each do |key, association_class|
+      #   association = association_class.new key, _serializer, options
 
-      arel = relation_query.arel.dup
+      #   association_reflection = klass.reflect_on_association(key)
+      #   fkey = association_reflection.foreign_key
+      #   if association.embed_ids?
+      #     if association_reflection.macro == :has_many
+      #       unless @_ctes.find { |as| as.left == ids_table_name }
+      #         @_ctes << _postgres_cte_as(ids_table_name, "(#{id_query.to_sql})")
+      #       end
+      #       association_sql_tables << _process_has_many_relation(key, association_reflection, relation_query, ids_table_arel)
+      #     elsif klass.column_names.include?(fkey) && !attributes.include?(fkey.to_sym)
+      #       relation_query = relation_query.select(relation_query_arel[fkey])
+      #     end
+      #   end
+      # end
 
-      association_sql_tables.each do |assoc_hash|
-        assoc_table = Arel::Table.new assoc_hash[:table]
-        arel.join(assoc_table, Arel::Nodes::OuterJoin).on(relation_query_arel[:id].eq(assoc_table[assoc_hash[:foreign_key]]))
-        arel.project _coalesce_arrays(assoc_table[assoc_hash[:ids_column]], assoc_hash[:ids_column])
-      end
+      arel = relation_query.dup
 
-      relation_table = _arel_to_cte(arel, relation.table_name, foreign_key_column)
+      # association_sql_tables.each do |assoc_hash|
+      #   assoc_table = Arel::Table.new assoc_hash[:table]
+      #   arel.join(assoc_table, Arel::Nodes::OuterJoin).on(relation_query_arel[:id].eq(assoc_table[assoc_hash[:foreign_key]]))
+      #   arel.project _coalesce_arrays(assoc_table[assoc_hash[:ids_column]], assoc_hash[:ids_column])
+      # end
 
-      associations.each do |key, association_class|
-        association = association_class.new key, _serializer, options
-        association_reflection = klass.reflect_on_association(key)
+      relation_table = _arel_to_cte(relation_query, arel, relation_query.table_name, foreign_key_column)
 
-        if association.embed_in_root? && !@_embedded.member?(key.to_s)
-          belongs_to = (association_reflection.macro == :belongs_to)
-          constraining_table_param = association_reflection.macro == :has_many ? ids_table_arel : relation_table
+      # associations.each do |key, association_class|
+      #   association = association_class.new key, _serializer, options
+      #   association_reflection = klass.reflect_on_association(key)
 
-          _include_relation_in_root(association_reflection.klass, association_reflection.foreign_key,
-            constraining_table_param, serializer: association.target_serializer, belongs_to: belongs_to)
-        end
-      end
+      #   if association.embed_in_root? && !@_embedded.member?(key.to_s)
+      #     belongs_to = (association_reflection.macro == :belongs_to)
+      #     constraining_table_param = association_reflection.macro == :has_many ? ids_table_arel : relation_table
+
+      #     _include_relation_in_root(association_reflection.klass, association_reflection.foreign_key,
+      #       constraining_table_param, serializer: association.target_serializer, belongs_to: belongs_to)
+      #   end
+      # end
     end
 
     def _process_has_many_relation(key, association_reflection, relation_query, ids_table_arel)
@@ -136,10 +131,6 @@ module PostgresExt::Serializers::ActiveModel
       association_query = association_query.having(association_arel_table[association_reflection.foreign_key].in(ids_table_arel.project(ids_table_arel[:id])))
       @_ctes << _postgres_cte_as(cte_name, "(#{association_query.to_sql})")
       { table: cte_name, ids_column: id_column_name, foreign_key: association_reflection.foreign_key }
-    end
-
-    def _visitor
-      @_visitior ||= object.klass.connection.visitor
     end
 
     def _serializer_class(klass)
@@ -163,7 +154,7 @@ module PostgresExt::Serializers::ActiveModel
           json_table.project("COALESCE(json_agg(tbl), '[]') as #{key}, 1 as match") :
           json_table.project("COALESCE(array_to_json(array_agg(row_to_json(tbl))), '[]') as #{key}, 1 as match")
 
-        @_ctes << _postgres_cte_as("#{key}_as_json_array", _visitor.accept(json_select_manager))
+        @_ctes << _postgres_cte_as("#{key}_as_json_array", json_select_manager.to_sql)
         tables << { table: "#{key}_as_json_array", column: key }
       end
 
@@ -177,23 +168,23 @@ module PostgresExt::Serializers::ActiveModel
         jsons_select.join(table).on(first_table[:match].eq(table[:match]))
       end
 
-      @_ctes << _postgres_cte_as('jsons', _visitor.accept(jsons_select))
+      @_ctes << _postgres_cte_as('jsons', jsons_select.to_sql)
 
       jsons_table = Arel::Table.new 'jsons'
       jsons_table.project("row_to_json(#{jsons_table.name})")
     end
 
-    def _arel_to_cte(arel, name, foreign_key_column)
+    def _arel_to_cte(relation_query, arel, name, foreign_key_column)
       cte_name = foreign_key_column ? "#{name}_#{foreign_key_column}" : name
       cte_table = Arel::Table.new "#{cte_name}_attributes_filter"
-      @_ctes << _postgres_cte_as(cte_table.name, _visitor.accept(arel))
+      @_ctes << _postgres_cte_as(cte_table.name, arel.to_sql)
       @_results_tables[name] = [] unless @_results_tables.has_key?(name)
       @_results_tables[name] << cte_table
       cte_table
     end
 
     def _postgres_cte_as(name, sql_string)
-      Arel::Nodes::As.new Arel.sql(name), Arel.sql(sql_string)
+      Arel::Nodes::As.new Arel.sql(name), Arel.sql("(#{sql_string})")
     end
 
     def _array_agg(column, aliaz = nil)
