@@ -31,9 +31,16 @@ module PostgresExt::Serializers::ActiveModel
       relation_query_arel = relation_query.arel_table
       @_embedded << relation_query.table_name
 
-      klass = ActiveRecord::Relation === relation_query ? relation_query.klass : relation_query
+      klass = nil
+      serializer_class = nil
 
-      serializer_class = relation.options[:serializer] || _serializer.class
+      if ActiveRecord::Relation
+        klass = relation_query.klass
+        serializer_class = _serializer.send(:serializers).first.class
+      else
+        klass = relation_query
+        serializer_class = relation.options[:serializer] || _serializer.class
+      end
 
       attributes = serializer_class._attributes
 

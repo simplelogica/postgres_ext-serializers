@@ -1,9 +1,9 @@
 ActiveModel::Serializer::Adapter::Attributes.class_eval do
   include PostgresExt::Serializers::ActiveModel::ArraySerializer
 
-  def relationship_value_for(association, options)
-    if ActiveRecord::Relation === association.serializer.object
-      _postgres_serializable_array association, options
+  def  serializable_hash_for_collection(options)
+    if ActiveRecord::Relation === self.serializer.object
+      _postgres_serializable_array self, options
     else
       super
     end
