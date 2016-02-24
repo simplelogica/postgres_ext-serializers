@@ -44,6 +44,9 @@ module PostgresExt::Serializers::ActiveModel
           relation_query = relation_query.select Arel::Nodes::As.new Arel.sql(serializer_class.send("#{name}__sql")), Arel.sql(name.to_s)
         elsif klass.respond_to? "#{name}__sql"
           relation_query = relation_query.select Arel::Nodes::As.new Arel.sql(klass.send("#{name}__sql")), Arel.sql(name.to_s)
+        elsif klass.respond_to?(:translated?) && klass.translated?(name)
+          relation_query = relation_query.with_translations(Globalize.locale)
+          relation_query = relation_query.select(klass::Translation.arel_table[name])
         else
           relation_query = relation_query.select(relation_query_arel[name])
         end
