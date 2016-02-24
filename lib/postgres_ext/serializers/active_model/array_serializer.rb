@@ -25,7 +25,6 @@ module PostgresExt::Serializers::ActiveModel
       foreign_key_column = args[0]
       constraining_table = args[1]
 
-
       _serializer = relation.serializer
       relation_query = relation.serializer.object
       relation_query_arel = relation_query.arel_table
@@ -34,7 +33,7 @@ module PostgresExt::Serializers::ActiveModel
       klass = nil
       serializer_class = nil
 
-      if ActiveRecord::Relation
+      if relation_query.is_a? ActiveRecord::Relation
         klass = relation_query.klass
         serializer_class = _serializer.send(:serializers).first.class
       else
@@ -68,75 +67,119 @@ module PostgresExt::Serializers::ActiveModel
       end
 
 
-      # associations = serializer_class._reflections
+      associations = serializer_class._reflections
 
-      # association_sql_tables = []
-      # ids_table_name = nil
-      # id_query = nil
-      # unless associations.empty?
-      #   ids_table_name = "#{relation.table_name}_ids"
-      #   ids_table_arel =  Arel::Table.new ids_table_name
-      #   id_query = relation.dup.select(:id)
-      #   if foreign_key_column && constraining_table
-      #     if local_options[:belongs_to]
-      #       id_query.where!(relation_query_arel[:id].in(constraining_table.project(constraining_table[foreign_key_column])))
-      #     else
-      #       id_query.where!(relation_query_arel[foreign_key_column].in(constraining_table.project(constraining_table[:id])))
-      #     end
-      #   end
-      # end
+      association_sql_tables = []
+      ids_table_name = nil
+      id_query = nil
+      unless associations.empty?
+        ids_table_name = "#{relation_query.table_name}_ids"
+        ids_table_arel =  Arel::Table.new ids_table_name
+        id_query = relation_query.dup.select(:id)
+        if foreign_key_column && constraining_table
+          if local_options[:belongs_to]
+            id_query.where!(relation_query_arel[:id].in(constraining_table.project(constraining_table[foreign_key_column])))
+          else
+            id_query.where!(relation_query_arel[foreign_key_column].in(constraining_table.project(constraining_table[:id])))
+          end
+        end
+      end
 
-      # associations.each do |key, association_class|
-      #   association = association_class.new key, _serializer, options
+      associations.each do |association_reflection|
+        # get the association from the model
+        model_association = relation_query.reflections[association_reflection.name.to_s]
 
-      #   association_reflection = klass.reflect_on_association(key)
-      #   fkey = association_reflection.foreign_key
-      #   if association.embed_ids?
-      #     if association_reflection.macro == :has_many
-      #       unless @_ctes.find { |as| as.left == ids_table_name }
-      #         @_ctes << _postgres_cte_as(ids_table_name, "(#{id_query.to_sql})")
-      #       end
-      #       association_sql_tables << _process_has_many_relation(key, association_reflection, relation_query, ids_table_arel)
-      #     elsif klass.column_names.include?(fkey) && !attributes.include?(fkey.to_sym)
-      #       relation_query = relation_query.select(relation_query_arel[fkey])
-      #     end
-      #   end
-      # end
+        if model_association
+          if model_association.is_a? ActiveRecord::Reflection::HasAndBelongsToManyReflection
+            # This inserts the query to extract a query to extract this model ids
+            unless @_ctes.find { |as| as.left == ids_table_name }
+              @_ctes << _postgres_cte_as(ids_table_name, "(#{id_query.to_sql})")
+            end
+            association_sql_tables << _process_has_and_belongs_to_many(association_reflection.name, model_association, relation_query, ids_table_arel)
 
-      arel = relation_query.dup
+          end
 
-      # association_sql_tables.each do |assoc_hash|
-      #   assoc_table = Arel::Table.new assoc_hash[:table]
-      #   arel.join(assoc_table, Arel::Nodes::OuterJoin).on(relation_query_arel[:id].eq(assoc_table[assoc_hash[:foreign_key]]))
-      #   arel.project _coalesce_arrays(assoc_table[assoc_hash[:ids_column]], assoc_hash[:ids_column])
-      # end
+        else
+          fkey = association_reflection.foreign_key
+          if association.embed_ids?
+            if association_reflection.macro == :has_many
+              unless @_ctes.find { |as| as.left == ids_table_name }
+                @_ctes << _postgres_cte_as(ids_table_name, "(#{id_query.to_sql})")
+              end
+              association_sql_tables << _process_has_many_relation(key, association_reflection, relation_query, ids_table_arel)
+            elsif klass.column_names.include?(fkey) && !attributes.include?(fkey.to_sym)
+              relation_query = relation_query.select(relation_query_arel[fkey])
+            end
+          end
+        end
+      end
+
+      arel = if relation_query.is_a? ActiveRecord::Relation
+        relation_query.arel_table.dup
+      else
+        relation_query.dup
+      end
+
+
+      association_sql_tables.each do |assoc_hash|
+        assoc_table = Arel::Table.new assoc_hash[:table]
+        arel.join(assoc_table, Arel::Nodes::OuterJoin).on(relation_query_arel[:id].eq(assoc_table[assoc_hash[:foreign_key]]))
+        arel.project _coalesce_arrays(assoc_table[assoc_hash[:ids_column]], assoc_hash[:ids_column])
+      end
+
 
       relation_table = _arel_to_cte(relation_query, arel, relation_query.table_name, foreign_key_column)
 
-      # associations.each do |key, association_class|
-      #   association = association_class.new key, _serializer, options
-      #   association_reflection = klass.reflect_on_association(key)
+      # associations.each do |association_reflection|
+      #   belongs_to = (association_reflection.macro == :belongs_to)
+      #   constraining_table_param = association_reflection.macro == :has_many ? ids_table_arel : relation_table
 
-      #   if association.embed_in_root? && !@_embedded.member?(key.to_s)
-      #     belongs_to = (association_reflection.macro == :belongs_to)
-      #     constraining_table_param = association_reflection.macro == :has_many ? ids_table_arel : relation_table
+      #   serialized_class = association_reflection.options[:serializer].serialized_class
+      #   association_attributes =  ActiveModel::SerializableResource.new(serialized_class.all, each_serializer: association_reflection.options[:serializer])
 
-      #     _include_relation_in_root(association_reflection.klass, association_reflection.foreign_key,
-      #       constraining_table_param, serializer: association.target_serializer, belongs_to: belongs_to)
-      #   end
+      #   _include_relation_in_root(
+      #     ActiveModel::Serializer::Adapter::Attributes.new(association_attributes.serializer_instance),
+      #     'zorg',
+      #     constraining_table_param,
+      #     belongs_to: belongs_to)
       # end
     end
 
     def _process_has_many_relation(key, association_reflection, relation_query, ids_table_arel)
+      # get the model behind the relation
       association_class = association_reflection.klass
+      # and its table
       association_arel_table = association_class.arel_table
+      # group the objects by the foreign_key (normally id)
       association_query = association_class.group association_arel_table[association_reflection.foreign_key]
+      # select  the foreign_keys
       association_query = association_query.select(association_arel_table[association_reflection.foreign_key])
+      #aggregate the ids
       id_column_name = "#{key.to_s.singularize}_ids"
       cte_name = "#{id_column_name}_by_#{relation_query.table_name}"
       association_query = association_query.select(_array_agg(association_arel_table[:id], id_column_name))
+      # filter by the id being in the ids set
       association_query = association_query.having(association_arel_table[association_reflection.foreign_key].in(ids_table_arel.project(ids_table_arel[:id])))
+      # add to the temporal tables array
       @_ctes << _postgres_cte_as(cte_name, "(#{association_query.to_sql})")
+      { table: cte_name, ids_column: id_column_name, foreign_key: association_reflection.foreign_key }
+    end
+
+    def _process_has_and_belongs_to_many(key, association_reflection, relation_query, ids_table_arel)
+      # get the join table in the relation
+      association_join_table = association_reflection.join_table
+      arel_table = Arel::Table.new association_join_table
+      id_column_name = "#{key.to_s.singularize}_ids"
+      cte_name = "#{id_column_name}_by_#{relation_query.table_name}"
+      # aggregate the ids into
+      arel_query = arel_table.
+        project(association_reflection.association_foreign_key).
+        # filter by the id being in the ids set
+        where(arel_table[association_reflection.foreign_key].in(ids_table_arel.project(ids_table_arel[:id])))
+      # add to the temporal tables array
+      binding.pry
+
+      @_ctes << _postgres_cte_as(cte_name, "(#{arel_query.to_sql})")
       { table: cte_name, ids_column: id_column_name, foreign_key: association_reflection.foreign_key }
     end
 
